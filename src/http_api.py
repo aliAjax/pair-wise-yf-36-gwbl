@@ -94,9 +94,10 @@ def create_handler(service, rules, static_dir):
                         return self._send(200, service.get(parts[2]))
                     query = parse_qs(parsed.query)
                     status = query.get("status", [None])[0]
+                    restricted = query.get("restricted", [None])[0]
                     return self._send(
                         200,
-                        {"items": service.list(parts[1], status=status)},
+                        {"items": service.list(parts[1], status=status, restricted=restricted)},
                     )
                 raise NotFoundError("not found")
             except Exception as exc:
@@ -117,6 +118,19 @@ def create_handler(service, rules, static_dir):
                     return self._send(
                         200,
                         service.transition(actor, parts[2], action, data, expected),
+                    )
+                if len(parts) == 3 and parts[:2] == ["api", "batches"] and parts[2] == "store":
+                    body = self._body()
+                    idem = self.headers.get("Idempotency-Key")
+                    return self._send(
+                        200,
+                        service.batch_store(
+                            actor,
+                            body.get("consent_id"),
+                            body.get("items") or [],
+                            body.get("expected_consent_version"),
+                            idem,
+                        ),
                     )
                 if len(parts) == 4 and parts[0] == "api" and parts[3] == "actions":
                     body = self._body()

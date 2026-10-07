@@ -25,9 +25,34 @@ def _validate_sample_store(actor, entity, data, lookup):
     consent = _find_one(lookup, "consent", "id", data.get("consent_id"))
     if not consent or consent["status"] != "active":
         raise ValidationError("storage requires active consent")
-    if "research" not in consent["data"].get("scope", []):
+    scope = consent["data"].get("scope", [])
+    if "research" not in scope:
         raise ValidationError("consent does not include research use")
-    return {"stored_at": "2026-09-24T00:00:00Z"}
+    return {
+        "stored_at": "2026-09-24T00:00:00Z",
+        "scope": list(scope),
+        "consent_version": consent["data"].get("version"),
+        "restricted": False,
+        "restricted_uses": [],
+    }
+
+
+def _validate_sample_loan(actor, entity, data, lookup):
+    if entity["data"].get("restricted"):
+        raise ValidationError(
+            "sample is restricted under consent version %s; loan is not allowed"
+            % entity["data"].get("restricted_by_consent_version")
+        )
+    return {}
+
+
+def _validate_sample_anonymize(actor, entity, data, lookup):
+    if entity["data"].get("restricted"):
+        raise ValidationError(
+            "sample is restricted under consent version %s; anonymization is not allowed"
+            % entity["data"].get("restricted_by_consent_version")
+        )
+    return {}
 
 
 def _validate_withdrawal_approve(actor, entity, data, lookup):
@@ -41,7 +66,7 @@ def _validate_withdrawal_approve(actor, entity, data, lookup):
 
 
 CUSTOM_CREATE = {'participant': _validate_participant, 'consent': _validate_consent}
-CUSTOM_TRANSITIONS = {('sample', 'store'): _validate_sample_store, ('withdrawal', 'approve'): _validate_withdrawal_approve}
+CUSTOM_TRANSITIONS = {('sample', 'store'): _validate_sample_store, ('sample', 'loan'): _validate_sample_loan, ('sample', 'anonymize'): _validate_sample_anonymize, ('withdrawal', 'approve'): _validate_withdrawal_approve}
 
 
 class RuleEngine:

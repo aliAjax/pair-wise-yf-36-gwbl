@@ -87,7 +87,7 @@ class SQLiteRepository:
             ).fetchone()
         return self._entity_from_row(row) if row else None
 
-    def list_entities(self, kind=None, status=None):
+    def list_entities(self, kind=None, status=None, restricted=None):
         clauses = []
         params = []
         if kind:
@@ -101,7 +101,15 @@ class SQLiteRepository:
             rows = connection.execute(
                 "SELECT * FROM entities" + where + " ORDER BY created_at, id", params
             ).fetchall()
-        return [self._entity_from_row(row) for row in rows]
+        entities = [self._entity_from_row(row) for row in rows]
+        if restricted is not None and (kind is None or kind == "sample"):
+            want = str(restricted).lower() in ("1", "true", "yes")
+            entities = [
+                entity
+                for entity in entities
+                if bool(entity["data"].get("restricted")) == want
+            ]
+        return entities
 
     def find_entities(self, kind, field, value):
         return [
