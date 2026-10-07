@@ -4,7 +4,20 @@ from .domain import (
     ConflictError,
     InvalidTransition,
     PermissionDenied,
+    RestrictedUseError,
     ValidationError,
+)
+
+
+# Fields governed by the rule engine. Clients may never set them directly.
+MANAGED_SAMPLE_FIELDS = (
+    "consent_id",
+    "consent_version",
+    "granted_purposes",
+    "availability",
+    "restricted_purposes",
+    "restricted_basis",
+    "stored_at",
 )
 
 
@@ -21,13 +34,52 @@ def _validate_consent(actor, data, lookup):
         raise ValidationError("consent scope is required")
 
 
+def _snapshot_storage(data, consent):
+    scope = list(consent["data"].get("scope", []))
+    return {
+        "stored_at": "2026-09-24T00:00:00Z",
+        "consent_id": consent["id"],
+        "consent_version": consent["data"].get("version"),
+        "granted_purposes": scope,
+        "availability": "available",
+        "restricted_purposes": [],
+        "restricted_basis": None,
+    }
+
+
 def _validate_sample_store(actor, entity, data, lookup):
     consent = _find_one(lookup, "consent", "id", data.get("consent_id"))
     if not consent or consent["status"] != "active":
         raise ValidationError("storage requires active consent")
     if "research" not in consent["data"].get("scope", []):
         raise ValidationError("consent does not include research use")
-    return {"stored_at": "2026-09-24T00:00:00Z"}
+    return _snapshot_storage(data, consent)
+
+
+def _assert_not_restricted(entity):
+    if entity["data"].get("availability") == "restricted":
+        basis = entity["data"].get("restricted_basis") or {}
+        raise RestrictedUseError(
+            "sample is restricted under consent %s (%s)"
+            % (basis.get("consent_id", "?"), basis.get("version", "?"))
+        )
+
+
+def _validate_sample_loan(actor, entity, data, lookup):
+    _assert_not_restricted(entity)
+    purpose = data.get("purpose")
+    allowed = entity["data"].get("granted_purposes") or []
+    if purpose not in allowed:
+        raise RestrictedUseError(
+            "purpose %r is not covered by consent %s"
+            % (purpose, entity["data"].get("consent_version"))
+        )
+    return {}
+
+
+def _validate_sample_anonymize(actor, entity, data, lookup):
+    _assert_not_restricted(entity)
+    return {}
 
 
 def _validate_withdrawal_approve(actor, entity, data, lookup):
@@ -41,17 +93,64 @@ def _validate_withdrawal_approve(actor, entity, data, lookup):
 
 
 CUSTOM_CREATE = {'participant': _validate_participant, 'consent': _validate_consent}
-CUSTOM_TRANSITIONS = {('sample', 'store'): _validate_sample_store, ('withdrawal', 'approve'): _validate_withdrawal_approve}
+CUSTOM_TRANSITIONS = {
+    ('sample', 'store'): _validate_sample_store,
+    ('sample', 'loan'): _validate_sample_loan,
+    ('sample', 'anonymize'): _validate_sample_anonymize,
+    ('withdrawal', 'approve'): _validate_withdrawal_approve,
+}
 
 
 class RuleEngine:
     ALIASES = {'participants': 'participant', 'consents': 'consent', 'samples': 'sample', 'withdrawals': 'withdrawal'}
     INITIAL_STATUS = {'participant': 'registered', 'consent': 'draft', 'sample': 'collected', 'withdrawal': 'requested'}
-    TRANSITIONS = {'participant': {'close_participant': (('registered',), 'closed')}, 'consent': {'activate': (('draft',), 'active'), 'supersede': (('active',), 'superseded'), 'withdraw': (('active',), 'withdrawn')}, 'sample': {'store': (('collected',), 'stored'), 'loan': (('stored',), 'on_loan'), 'return': (('on_loan',), 'stored'), 'anonymize': (('stored',), 'anonymized'), 'destroy': (('stored',), 'destroyed')}, 'withdrawal': {'approve': (('requested',), 'approved'), 'execute': (('approved',), 'executed')}}
+    TRANSITIONS = {
+        'participant': {'close_participant': (('registered',), 'closed')},
+        'consent': {
+            'activate': (('draft',), 'active'),
+            'countersign': (('active',), 'active'),
+            'supersede': (('active',), 'superseded'),
+            'withdraw': (('active',), 'withdrawn'),
+        },
+        'sample': {
+            'store': (('collected',), 'stored'),
+            'loan': (('stored',), 'on_loan'),
+            'return': (('on_loan',), 'stored'),
+            'anonymize': (('stored',), 'anonymized'),
+            'destroy': (('stored', 'on_loan'), 'destroyed'),
+        },
+        'withdrawal': {'approve': (('requested',), 'approved'), 'execute': (('approved',), 'executed')},
+    }
     CREATE_REQUIRED = {'participant': ('name',), 'consent': ('participant_id', 'scope'), 'sample': ('participant_id', 'sample_code', 'collected_at'), 'withdrawal': ('participant_id', 'requested_at')}
-    ACTION_REQUIRED = {('consent', 'activate'): ('scope', 'version', 'expires_at'), ('consent', 'supersede'): ('reason',), ('consent', 'withdraw'): ('reason',), ('sample', 'store'): ('freezer', 'position', 'consent_id'), ('sample', 'loan'): ('recipient', 'purpose', 'due_at'), ('sample', 'anonymize'): ('reason',), ('sample', 'destroy'): ('reason',), ('withdrawal', 'approve'): ('reason', 'sample_ids'), ('withdrawal', 'execute'): ('executed_at',)}
-    CREATE_ROLES = {'participant': ('admin', 'biobank'), 'consent': ('admin', 'committee'), 'sample': ('admin', 'biobank'), 'withdrawal': ('admin', 'biobank')}
-    ROLE_ACTIONS = {'close_participant': ('admin', 'biobank'), 'activate': ('admin', 'committee'), 'supersede': ('admin', 'committee'), 'withdraw': ('admin', 'committee'), 'store': ('admin', 'biobank'), 'loan': ('admin', 'biobank'), 'return': ('admin', 'biobank'), 'anonymize': ('admin', 'biobank'), 'destroy': ('admin', 'biobank'), 'approve': ('admin', 'committee'), 'execute': ('admin', 'biobank')}
+    ACTION_REQUIRED = {
+        ('consent', 'activate'): ('scope', 'version', 'expires_at'),
+        ('consent', 'countersign'): (),
+        ('consent', 'supersede'): ('reason',),
+        ('consent', 'withdraw'): ('reason',),
+        ('sample', 'store'): ('freezer', 'position', 'consent_id'),
+        ('sample', 'loan'): ('recipient', 'purpose', 'due_at'),
+        ('sample', 'anonymize'): ('reason',),
+        ('sample', 'destroy'): ('reason',),
+        ('withdrawal', 'approve'): ('reason', 'sample_ids'),
+        ('withdrawal', 'execute'): ('executed_at',),
+    }
+    CREATE_ROLES = {'participant': ('admin', 'biobank'), 'consent': ('admin', 'committee'), 'sample': ('admin', 'biobank', 'researcher'), 'withdrawal': ('admin', 'biobank')}
+    ROLE_ACTIONS = {
+        'close_participant': ('admin', 'biobank'),
+        'activate': ('admin', 'committee'),
+        'countersign': ('admin', 'biobank'),
+        'supersede': ('admin', 'committee'),
+        'withdraw': ('admin', 'committee'),
+        'store': ('admin', 'biobank', 'researcher'),
+        'loan': ('admin', 'biobank'),
+        'return': ('admin', 'biobank'),
+        'anonymize': ('admin', 'biobank'),
+        'destroy': ('admin', 'biobank'),
+        'approve': ('admin', 'committee'),
+        'execute': ('admin', 'biobank'),
+    }
+    # Roles allowed to drive the batch storage use case.
+    BATCH_STORE_ROLES = ('admin', 'biobank', 'researcher')
 
     def normalize_kind(self, kind):
         return self.ALIASES.get(kind, kind)
@@ -104,6 +203,14 @@ class RuleEngine:
         extra = custom(actor, entity, data, lookup) if custom else {}
         patch = dict(data)
         if extra:
+            patch.update(extra)
+        # Never let callers overwrite rule-engine-managed sample fields.
+        if kind == "sample" and action != "store":
+            for field in MANAGED_SAMPLE_FIELDS:
+                patch.pop(field, None)
+        elif kind == "sample" and action == "store":
+            for field in MANAGED_SAMPLE_FIELDS:
+                patch.pop(field, None)
             patch.update(extra)
         return next_status, patch
 

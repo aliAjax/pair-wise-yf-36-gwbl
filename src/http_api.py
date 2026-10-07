@@ -10,6 +10,7 @@ from .domain import (
     InvalidTransition,
     NotFoundError,
     PermissionDenied,
+    RestrictedUseError,
     ValidationError,
     Actor,
 )
@@ -63,7 +64,7 @@ def create_handler(service, rules, static_dir):
                 status = 403
             elif isinstance(exc, NotFoundError):
                 status = 404
-            elif isinstance(exc, (ConflictError, InvalidTransition)):
+            elif isinstance(exc, (ConflictError, InvalidTransition, RestrictedUseError)):
                 status = 409
             elif isinstance(exc, ValidationError):
                 status = 400
@@ -85,6 +86,8 @@ def create_handler(service, rules, static_dir):
                         return self._send_html(200, handle.read())
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
+                if len(parts) == 3 and parts[:2] == ["api", "batches"]:
+                    return self._send(200, service.get_batch(parts[2]))
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
                 if len(parts) >= 2 and parts[0] == "api":
@@ -137,6 +140,17 @@ def create_handler(service, rules, static_dir):
                     return self._send(
                         200,
                         service.transition(actor, parts[2], parts[3], self._body(), None),
+                    )
+                if len(parts) == 2 and parts[0] == "api" and parts[1] == "batches":
+                    body = self._body()
+                    return self._send(
+                        200,
+                        service.batch_store_samples(
+                            actor,
+                            body.get("consent_id"),
+                            body.get("items") or [],
+                            batch_id=body.get("batch_id"),
+                        ),
                     )
                 if len(parts) == 2 and parts[0] == "api":
                     body = self._body()

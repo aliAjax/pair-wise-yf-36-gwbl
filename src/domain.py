@@ -27,6 +27,10 @@ class InvalidTransition(DomainError):
     """The requested state transition is not valid."""
 
 
+class RestrictedUseError(DomainError):
+    """The sample is restricted by a newer consent version; use is paused."""
+
+
 class Role(str, Enum):
     viewer = "viewer"
     admin = "admin"

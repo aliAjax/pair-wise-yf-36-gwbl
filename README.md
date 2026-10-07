@@ -33,9 +33,31 @@ python3 app.py --db ./data.db --port 8302
 - `POST /api/<kind>`：创建对象；请求体为JSON。
 - `GET /api/entities/<id>`：读取对象当前版本。
 - `POST /api/entities/<id>/actions`：提交`{"action":"动作名","data":{...},"expected_version":数字}`。
+- `POST /api/batches`：批量入库（见下）。
+- `GET /api/batches/<batch_id>`：查询批次及每条条目的核对结果。
 - `GET /api/audit`：读取审计记录。
 
 请求身份通过`X-User-Id`和`X-Role`请求头传入。创建和动作的可执行角色由规则引擎控制。
+
+## 同意版本重算与受限样本
+
+- 委员会激活新版同意（`consent/activate`）时，旧版同意自动变为`superseded`，旧版样本的可用范围按新`scope`重算：新范围未覆盖的用途写入`restricted_purposes`，样本`availability`变为`restricted`，并记录`restricted_basis`（触发重算的同意ID与版本，页面上显示为“受限依据版本”）。
+- 受限样本的借出（`loan`，含用途必须在`granted_purposes`内）与匿名化（`anonymize`）被拦截，返回`409 RestrictedUseError`；在借样本可归还，销毁不受限。
+- 参与者补签新同意（`consent/countersign`）后，受限样本重新挂到新同意版本，清除受限标记，借出与匿名化恢复。
+- 激活重算与批量入库共用一个`BEGIN IMMEDIATE`事务。两者撞车时整批样本只落在同一个同意版本下：要么整批按旧版入库（随后被重算），要么整批被拒绝（`409`），不会跨版本拆分。
+
+## 批量入库与续跑
+
+`POST /api/batches`请求体：
+
+```json
+{"batch_id": "可选，重试时传同一个",
+ "consent_id": "整批钉死的同意版本",
+ "items": [{"ref": "调用方稳定键", "participant_id": "...", "sample_code": "...",
+            "collected_at": "...", "freezer": "...", "position": "..."}]}
+```
+
+条目逐条核对：合法的直接入库，失败的写入批次明细且不影响其他条目，批次状态为`completed`或`partial`。用同一`batch_id`重试时，已算好的条目直接复用，只重提并核对之前失败的条目；若钉住的同意版本已被作废旧，重试整批拒绝（`409`）。
 
 ## 测试
 
